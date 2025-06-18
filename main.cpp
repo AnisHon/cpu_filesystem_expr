@@ -8,7 +8,11 @@
 #include <list>
 #include <memory>
 #include <bitset>
+#include <chrono>
 #include <iomanip>
+#include <cstring>
+#include <utility>
+
 
 enum PAGE_SWAP_ALGO {
     FIFO,
@@ -18,8 +22,8 @@ enum PAGE_SWAP_ALGO {
 };
 double waterline;
 constexpr uint32_t DISK_SIZE = 12 * 1024 * 1024;
-constexpr uint PAGE_BIT_SIZE = 12;
-constexpr uint PAGE_SIZE = ~(0xFFFFFFFF << PAGE_BIT_SIZE) + 1;
+constexpr unsigned int PAGE_BIT_SIZE = 12;
+constexpr unsigned int PAGE_SIZE = ~(0xFFFFFFFF << PAGE_BIT_SIZE) + 1;
 PAGE_SWAP_ALGO page_swap_algo = FIFO;
 
 std::string timestamp_to_date(uint32_t timestamp) {
@@ -34,6 +38,18 @@ std::string timestamp_to_date(uint32_t timestamp) {
     std::ostringstream oss;
     oss << std::put_time(local_time, "%Y-%m-%d %H:%M:%S");
     return oss.str();
+}
+
+std::vector<std::string> split_string(const std::string &s, const char delimiter) {
+    std::vector<std::string> tokens;
+    std::string token;
+    std::istringstream tokenStream(s);
+
+    while (std::getline(tokenStream, token, delimiter)) {
+        tokens.push_back(token);
+    }
+
+    return tokens;
 }
 
 static void write_raw(std::vector<std::byte> &memory_, const uint32_t paddr, const uint32_t data) {
@@ -69,7 +85,7 @@ public:
     Fault(const uint32_t vaddr_, const FaultType type_): vaddr(vaddr_), type(type_) {}
 
 
-    const char* what() const noexcept override {
+    [[nodiscard]] const char* what() const noexcept override {
         std::map<FaultType, std::string> fault_name_map = {
             std::make_pair(FaultType::DIV, "divide error"),
             std::make_pair(FaultType::GP, "general protection fault"),
@@ -128,34 +144,34 @@ public:
         pt_[page_number].ppn = ppn;
     }
 
-    uint32_t translate(const uint32_t vaddr) const {
+    [[nodiscard]] uint32_t translate(const uint32_t vaddr) const {
         const uint32_t vpn = get_page_number(vaddr);
         const uint32_t offset = get_off(vaddr);
         const uint32_t ppn = pt_[vpn].ppn;
         return ppn << PAGE_BIT_SIZE | offset;
     }
 
-    bool is_dirty(const uint32_t vaddr) const {
+    [[nodiscard]] bool is_dirty(const uint32_t vaddr) const {
         const auto page_number = get_page_number(vaddr);
         return pt_[page_number].dirty;
     }
 
-    bool is_present(const uint32_t vaddr) const {
+    [[nodiscard]] bool is_present(const uint32_t vaddr) const {
         const auto page_number = get_page_number(vaddr);
         return pt_[page_number].present;
     }
 
-    bool is_supervisor(const uint32_t vaddr) const {
+    [[nodiscard]] bool is_supervisor(const uint32_t vaddr) const {
         const auto page_number = get_page_number(vaddr);
         return pt_[page_number].us;
     }
 
-    bool is_write(const uint32_t vaddr) const {
+    [[nodiscard]] bool is_write(const uint32_t vaddr) const {
         const auto page_number = get_page_number(vaddr);
         return pt_[page_number].wr;
     }
 
-    bool is_exec(const uint32_t vaddr) const {
+    [[nodiscard]] bool is_exec(const uint32_t vaddr) const {
         const auto page_number = get_page_number(vaddr);
         return pt_[page_number].nx;
     }
@@ -213,7 +229,7 @@ public:
         write_raw(memory_, paddr, mdr);
     }
 
-    uint32_t read(const uint32_t vaddr) const {
+    [[nodiscard]] uint32_t read(const uint32_t vaddr) const {
         if (!pt_.is_present(vaddr)) {
             throw Fault(vaddr, FaultType::PF);
         }
@@ -221,7 +237,7 @@ public:
         return read_raw(memory_, paddr);
     }
 
-    uint32_t read_instruction(const uint32_t vaddr) const {
+    [[nodiscard]] uint32_t read_instruction(const uint32_t vaddr) const {
         if (!pt_.is_present(vaddr)) {
             throw Fault(vaddr, FaultType::PF);
         }
@@ -461,7 +477,7 @@ struct Inode {
     std::unique_ptr<std::array<uint32_t, 1024>> addr1;
     bool del_flag = false;
 
-    char type2c() const {
+    [[nodiscard]] char type2c() const {
         switch (type) {
             case INODE_FILE:
                 return '-';
@@ -474,7 +490,7 @@ struct Inode {
         }
     }
 
-    char mod2c(const int idx) const {
+    [[nodiscard]] char mod2c(const int idx) const {
         assert(idx >= 0 && idx < 9);
         char c = '-';
         if (mod & (static_cast<uint16_t>(0b100000000) >> idx)) {
@@ -498,7 +514,7 @@ struct Inode {
 };
 
 
-class FileSystem {
+class FileBlockLayer {
 private:
 public:
     // 连续分配一块
@@ -517,6 +533,30 @@ public:
 
         bitmap[idx] = true;
         return idx * PAGE_SIZE;
+    }
+
+    static void _update_ctime(Inode &node) {
+        const auto now = std::chrono::system_clock::now();
+        const uint32_t timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+            now.time_since_epoch()
+        ).count();
+        node.ctime = timestamp;
+    }
+
+    static void _update_mtime(Inode &node) {
+        const auto now = std::chrono::system_clock::now();
+        const uint32_t timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+            now.time_since_epoch()
+        ).count();
+        node.mtime = timestamp;
+    }
+
+    static void _update_atime(Inode &node) {
+        const auto now = std::chrono::system_clock::now();
+        const uint32_t timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+            now.time_since_epoch()
+        ).count();
+        node.atime = timestamp;
     }
 
     void _alloc_indirect(Inode &inode, const uint32_t block_idx) {
@@ -541,7 +581,7 @@ public:
         }
     }
 
-    std::array<std::byte, PAGE_SIZE> _read_block(const uint32_t block_idx) {
+    [[nodiscard]] std::array<std::byte, PAGE_SIZE> _read_block(const uint32_t block_idx) const {
         assert(bitmap[block_idx]);
         std::array<std::byte, PAGE_SIZE> block{};
         const uint32_t idx = block_idx * PAGE_SIZE;
@@ -573,8 +613,10 @@ public:
         return inode.addr1->at(block_idx) / PAGE_SIZE;
     }
 
+
+
     // 返回最终大小
-    uint32_t _write(Inode &inode, const uint32_t idx, const std::vector<std::byte> &data) {
+    uint32_t write(Inode &inode, const uint32_t idx, const std::vector<std::byte> &data) {
         const uint32_t data_size = data.size();
         uint32_t logic_block_idx = idx / PAGE_SIZE; // 逻辑地址
         const uint32_t file_size = std::max(inode.size, idx + data_size); // 文件最终大小
@@ -615,10 +657,13 @@ public:
             _write_block(block_idx, block); // 写回
         }
 
+        // 更新修改时间
+        _update_ctime(inode);
+        _update_mtime(inode);
         return file_size;
     }
 
-    std::vector<std::byte> _read(const Inode &inode, const uint32_t idx, const uint32_t size) {
+    std::vector<std::byte> read(Inode &inode, const uint32_t idx, const uint32_t size) const {
         std::vector<std::byte> bytes(size);
         uint32_t logical_block_idx = idx / PAGE_SIZE;
         uint32_t block_idx = get_real_block_idx(inode, logical_block_idx, true);
@@ -651,15 +696,19 @@ public:
             logical_block_idx++;
             block_idx = get_real_block_idx(inode, logical_block_idx); // 真实地址
             block = _read_block(block_idx);  // 先读
-            for (uint32_t j = 0; j < size; j++) {
+            for (uint32_t j = 0; j < size - data_idx; j++) {
                 bytes[data_idx++] = block[j];
             }
         }
 
+
+        // 更新访问时间
+        _update_atime(inode);
+        _update_mtime(inode);
         return bytes;
     }
 
-    uint32_t _create_inode(const InodeType type, const uint16_t mod, const uint32_t uid, const uint32_t gid) {
+    uint32_t create_inode(const InodeType type, const uint16_t mod, const uint32_t uid, const uint32_t gid) {
         const auto it = std::ranges::find_if(std::as_const(inodes), [] (const Inode &node) {return node.del_flag;});
         uint32_t ino;
         if (it == inodes.cend()) {
@@ -680,18 +729,21 @@ public:
         return ino;
     }
 
-    Inode &_stat(const uint32_t ino) {
+    Inode &stat(const uint32_t ino) {
+        assert(ino != 1);
         assert(ino < inodes.size());
         assert(!inodes[ino].del_flag);
         return inodes[ino]; // should be ok....
     }
 
 public:
-    void mkdir()
+    void mkdir() {
+
+    }
 
 
 public:
-    FileSystem(): disk() {
+    FileBlockLayer(): disk() {
         bitmap[0] = true; // 0号位置表示无效
     }
 
@@ -701,6 +753,209 @@ private:
     std::array<std::byte, DISK_SIZE> disk;
 
 
+};
+
+struct FileDesc {
+    uint32_t fpos;
+    uint8_t mod;
+    uint32_t ino;
+};
+
+struct Env {
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t pwd_ino;
+};
+
+class FileSystem {
+
+
+struct DirRec {
+    uint32_t ino;
+    uint16_t rec_len;   // 记录长度
+    uint8_t name_len;
+    const char *name;
+};
+
+private:
+
+    static std::list<DirRec> bytes2rec(const std::vector<std::byte> &bytes) {
+        std::list<DirRec> records;
+        uint32_t ptr = 0;
+        while (ptr < bytes.size()) {
+            uint32_t ino = (static_cast<uint32_t>(bytes[ptr]) << 24)
+            | (static_cast<uint32_t>(bytes[ptr + 1]) << 16)
+            | (static_cast<uint32_t>(bytes[ptr + 2]) << 8)
+            | (static_cast<uint32_t>(bytes[ptr + 3]));
+            uint16_t rec_len = (static_cast<uint16_t>(bytes[ptr + 4]) << 8)
+            | (static_cast<uint16_t>(bytes[ptr + 5]));
+            uint8_t name_len = (static_cast<uint8_t>(bytes[ptr + 6]));
+            records.emplace_back(ino, rec_len, name_len, reinterpret_cast<const char *>(&bytes[ptr + 7]));
+            ptr += rec_len;
+        }
+
+
+        return records;
+    }
+
+    // 顺序查找name的函数
+    [[nodiscard]] uint32_t _scan_dir(const uint32_t pino, const std::string &name) const {
+        assert(pino != 0);
+        Inode &inode = block_layer->stat(pino);
+        uint32_t ino = 0;
+        const auto data = block_layer->read(inode, 0, inode.size);
+
+        for (const auto recs = bytes2rec(data); const auto rec : recs) {
+            if (rec.ino == 0) {
+                continue;
+            }
+            if (std::string(rec.name, rec.name_len) == name) {
+                ino = rec.ino;
+            }
+        }
+        return ino;
+    }
+
+    static void bytes2rec(const std::list<DirRec> & recs, std::vector<std::byte> &bytes) {
+        uint32_t ptr = 0;
+        for (const auto & [ino, rec_len, name_len, name] : recs) {
+            assert(ptr + rec_len <= bytes.size());
+            bytes[ptr] = static_cast<std::byte>(ino >> 24);
+            bytes[ptr + 1] = static_cast<std::byte>((ino & 0x00FF0000) >> 16);
+            bytes[ptr + 2] = static_cast<std::byte>((ino & 0x0000FF00) >> 8);
+            bytes[ptr + 3] = static_cast<std::byte>(ino & 0x000000FF);
+            bytes[ptr + 4] = static_cast<std::byte>(rec_len >> 8);
+            bytes[ptr + 5] = static_cast<std::byte>(rec_len & 0x00FF);
+            bytes[ptr + 6] = static_cast<std::byte>(name_len);
+            for (int i = 0; i < name_len; ++i) {
+                bytes[ptr + 7 + i] = static_cast<std::byte>(name[i]);
+            }
+            ptr += rec_len;
+        }
+    }
+
+    void _create_rec(const uint32_t ino, DirRec &dir_rec, const Inode &meta) {
+        const uint32_t d_ino = block_layer->create_inode(meta.type, meta.mod, meta.uid, meta.gid); // 0是root
+        dir_rec.ino = d_ino;
+        Inode &inode = block_layer->stat(ino);
+        auto data = block_layer->read(inode, 0, inode.size);
+        auto recs = bytes2rec(data);
+        auto curr = recs.begin();
+        for (; curr != recs.end(); ++curr) {
+            if (const auto &rec = *curr; rec.ino != 0 || rec.rec_len < dir_rec.rec_len) {
+                continue;
+            }
+            break;
+        }
+
+        assert(curr != recs.end());
+        const auto &rec = *curr;
+        if (curr->rec_len - dir_rec.rec_len > 8) {
+            recs.emplace(curr, 0, curr->rec_len - dir_rec.rec_len, 0, nullptr);
+            curr->rec_len = dir_rec.rec_len;
+        }
+        curr->ino = dir_rec.ino;
+        curr->name_len = dir_rec.name_len;
+        curr->name = dir_rec.name;
+
+        bytes2rec(recs, data);
+        block_layer->write(inode, 0, data);
+
+    }
+
+    void _assign_empty_dir(const uint32_t ino) {
+        Inode &inode = block_layer->stat(ino);
+        std::vector<std::byte> data(PAGE_SIZE);
+        const std::list<DirRec> recs = {{
+            .ino = 0,
+            .rec_len = PAGE_SIZE,
+            .name_len = 0,
+            .name = "0",    // just in case
+        }};
+        bytes2rec(recs, data);
+        block_layer->write(inode, 0, data);
+    }
+
+    void _init_empty_dir(const uint32_t ino, const uint32_t pino, const Inode &meta) {
+        DirRec dir_rec = {
+            .ino = pino,     // 4
+            .rec_len = 9,    // 2
+            .name_len = 2,   // 1
+            .name = ".."     // 2
+        };
+        _create_rec(ino, dir_rec, meta);
+        dir_rec = {
+            .ino = ino,      // 4
+            .rec_len = 8,    // 2
+            .name_len = 1,   // 1
+            .name = "."      // 1
+        };
+        _create_rec(ino, dir_rec, meta);
+    }
+
+    uint32_t _make(uint32_t pino, const std::string &path, const Inode &meta) {
+        assert(pino != 0);
+        const std::vector<std::string> filenames = split_string(path, '/');
+        assert(!filenames.empty());
+
+        for (uint32_t i = 0; i < filenames.size() - 1; i++) {
+            pino = _scan_dir(pino, filenames[i]);
+            assert(pino != 0);
+        }
+
+        const std::string &name = filenames[filenames.size() - 1];
+        DirRec dir_rec = {
+            .ino = 0,
+            .rec_len = static_cast<uint16_t>(name.size() + 4 + 2 + 1),
+            .name_len = static_cast<uint8_t>(name.size()),
+            .name = name.c_str(),
+        };
+        _create_rec(pino, dir_rec, meta);
+        return dir_rec.ino;
+    }
+
+    uint32_t _mkdir(const uint32_t pino, const std::string &path, Inode &meta) {
+        meta.type = INODE_DIR;
+        const uint32_t ino = _make(pino, path, meta);
+        _assign_empty_dir(ino);
+        _init_empty_dir(ino, pino, meta);
+        return ino;
+    }
+
+    uint32_t _touch_file(const uint32_t pino, const std::string &path, Inode &meta) { // 创建文件
+        meta.type = INODE_FILE;
+        const uint32_t ino = _make(pino, path, meta);
+        return ino;
+    }
+
+
+public:
+    FileSystem(): block_layer(new FileBlockLayer())
+    , root_ino(block_layer->create_inode(INODE_DIR, 0b111101101, 0, 0)) {
+        // 初始化最初的 / 文件夹
+        _assign_empty_dir(root_ino);
+        _init_empty_dir(root_ino, root_ino, {
+            .mod = 0b111101101,
+            .uid = 0,
+            .gid = 0,
+        });
+    };
+
+
+
+
+    FileDesc *open(std::string path, uint8_t mode) {
+        auto *fd = new FileDesc{0, mode, 1};
+        return fd;
+    }
+
+    ~FileSystem() {
+        delete block_layer;
+    }
+
+private:
+    FileBlockLayer *block_layer;
+    const uint32_t root_ino;
 };
 
 
@@ -842,27 +1097,28 @@ void page_fault_handler(PageTable &pt, std::vector<std::byte> &memory, const Fau
 
 
 int main() {
-    auto *fs = new FileSystem();
+    auto *fs = new FileBlockLayer();
     std::vector<std::byte> p;
     for (int i = 0; i < PAGE_SIZE * 14; i++) {
         p.push_back(static_cast<std::byte>(i % 256));
     }
-    const uint32_t ino = fs->_create_inode(InodeType::INODE_FILE, 0b111111111, 1, 1);
-    Inode &inode = fs->_stat(ino);
-    const uint32_t size = fs->_write(inode, 1, p);
+    const uint32_t ino = fs->create_inode(InodeType::INODE_FILE, 0b111111111, 1, 1);
+    Inode &inode = fs->stat(ino);
+    const uint32_t size = fs->write(inode, 1, p);
     inode.size = size;
     std::cout << inode << std::endl;
-    auto result = fs->_read(inode, 0, 4096);
+    auto result = fs->read(inode, 0, 4096);
     for (auto byte : result) {
         std::cout << static_cast<uint16_t>(byte) << " " ;
     }
     std::cout << std::endl;
-    result = fs->_read(inode, 4096 * 13, 4097);
+    result = fs->read(inode, 4096 * 13, 4097);
     for (auto byte : result) {
         std::cout << static_cast<uint16_t>(byte) << " " ;
     }
     delete fs;
     // fs._write()
+    return 0;
 }
 
 
