@@ -12,6 +12,7 @@
 #include <chrono>
 #include <iomanip>
 #include <cstring>
+#include <filesystem>
 #include <ranges>
 #include <utility>
 
@@ -24,7 +25,7 @@ enum PAGE_SWAP_ALGO {
     LRU,
     CLOCK
 };
-double waterline;
+uint32_t waterline;
 constexpr uint32_t DISK_SIZE = 12 * 1024 * 1024;
 constexpr unsigned int PAGE_BIT_SIZE = 12;
 constexpr unsigned int PAGE_SIZE = ~(0xFFFFFFFF << PAGE_BIT_SIZE) + 1;
@@ -313,7 +314,7 @@ public:
             logic_block_idx++;
             block_idx = get_real_block_idx(inode, logic_block_idx);     // 下n块的真实地址
             for (int j = 0; j < PAGE_SIZE; j++) {
-                block[i] = data[data_idx++];
+                block[j] = data[data_idx++];
             }
             _write_block(block_idx, block);
         }
@@ -884,7 +885,7 @@ public:
 
 
 
-namespace fmod {
+namespace fmode {
     enum FILE_MODE {
         R = 0b100,
         W = 0b010,
@@ -971,7 +972,7 @@ FileDesc *file_open(const std::string &path, const uint8_t mode, const bool dir 
 }
 
 uint32_t get_ino(const std::string &path) {
-    const FileDesc *fd = file_open(path, fmod::R);
+    const FileDesc *fd = file_open(path, fmode::R);
     const uint32_t ino = fd->ino;
     FileSystem::fclose(fd);
     return ino;
@@ -998,7 +999,7 @@ void ls(const std::string &path) {
         .uid = accounts[current_user_idx].uid,
         .gid = accounts[current_user_idx].gid
     };
-    const FileDesc *fd= file_open(path, fmod::R);
+    const FileDesc *fd= file_open(path, fmode::R);
 
     for (const auto recs = fs.list(fd->ino, meta); const auto &rec : recs | std::views::reverse) {
         std::cout << std::setw(20) << std::left << std::string(rec.name, rec.name_len);
@@ -1014,7 +1015,7 @@ void ll(const std::string &path) {
         .uid = accounts[current_user_idx].uid,
         .gid = accounts[current_user_idx].gid
     };
-    const FileDesc *fd= file_open(path, fmod::R);
+    const FileDesc *fd= file_open(path, fmode::R);
 
     for (const auto recs = fs.list(fd->ino, meta); const auto &rec : recs | std::views::reverse) {
         const Inode &inode = fs.stat(rec.ino);
@@ -1036,7 +1037,7 @@ void rm(const std::string &path) {
 }
 
 std::vector<std::byte> readb(const std::string &path, const uint32_t off, uint32_t size = 0) {
-    FileDesc *fd = file_open(path, fmod::R, false);
+    FileDesc *fd = file_open(path, fmode::R, false);
     const auto &inode = fs.stat(fd->ino);
     if (inode.type == INODE_DIR) {
         throw std::runtime_error("cat: Object is a directory");
@@ -1059,7 +1060,7 @@ void cat(const std::string &path) {
 }
 
 void writeb(const std::string &path, const std::vector<std::byte> &bytes, const uint32_t off) {
-    FileDesc *fd = file_open(path, fmod::R, false);
+    FileDesc *fd = file_open(path, fmode::R, false);
     const auto &inode = fs.stat(fd->ino);
     if (inode.type == INODE_DIR) {
         throw std::runtime_error("write: Object is a directory");
@@ -1086,7 +1087,7 @@ void write(const std::string &path, const std::string &text, const bool append) 
 
 
 void truncate(const std::string &path) {
-    auto *fd = file_open(path, fmod::R, false);
+    auto *fd = file_open(path, fmode::R, false);
     const auto &inode = fs.stat(fd->ino);
     if (inode.type == INODE_DIR) {
         throw std::runtime_error("write: Object is a directory");
@@ -1097,7 +1098,7 @@ void truncate(const std::string &path) {
 
 void cd(const std::string &path) {
     assert(!path.empty());
-    const auto *fd = file_open(path, fmod::X);
+    const auto *fd = file_open(path, fmode::X);
     if (const auto &inode =fs.stat(fd->ino); inode.type == INODE_FILE) {
         throw std::runtime_error("cd: Object is a file");
     }
@@ -1222,8 +1223,19 @@ void expr2() {
 }
 
 
+static std::list<uint32_t> page_queue;
+PAGE_SWAP_ALGO algo = LRU;
 
-
+void lru_access(const uint32_t vpn) {
+    if (algo != LRU) {
+        return;
+    }
+    const auto it = std::find(page_queue.cbegin(), page_queue.cend(), vpn);
+    if (it != page_queue.end()) {
+        page_queue.erase(it);
+        page_queue.push_back(vpn);
+    }
+}
 
 
 enum FaultType {
@@ -1407,6 +1419,7 @@ public:
         if (!pt_.is_present(vaddr)) {
             throw Fault(vaddr, FaultType::PF);
         }
+        lru_access(PageTable::get_page_number(vaddr));
         pt_.set_dirty(vaddr, true);
         pt_.set_accessed(vaddr, true);
         const uint32_t paddr = pt_.translate(vaddr);
@@ -1417,6 +1430,7 @@ public:
         if (!pt_.is_present(vaddr)) {
             throw Fault(vaddr, FaultType::PF);
         }
+        lru_access(PageTable::get_page_number(vaddr));
         pt_.set_accessed(vaddr, true);
         const uint32_t paddr = pt_.translate(vaddr);
         return read_raw(memory_, paddr);
@@ -1761,6 +1775,56 @@ void init_code(const std::string &path, const int pages_cnt) {
     };
     std::cout << std::dec << std::endl;
 }
+
+void init_code2(const std::string &path) {
+    constexpr int pages_cnt = 5;
+    std::vector<uint32_t> codes = {
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 0),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 1),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 2),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 3),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 0),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 1),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 4),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 0),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 1),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 2),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 3),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(MOV_IL, {NUL, EAX, NUL, NUL}, PAGE_SIZE * 4),
+        make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
+        make_instruction(HLT, {NUL, NUL, NUL, NUL}, 0),
+    };
+    codes.resize(pages_cnt * PAGE_SIZE / 4);
+    std::vector<std::byte> bytes(PAGE_SIZE * pages_cnt);
+    uint32_t paddr = 0;
+    for (const uint32_t code : codes) {
+        if (paddr >= pages_cnt * PAGE_SIZE) {
+            break;
+        }
+        // std::cout << std::hex << code << std::endl;
+        // write_raw(memory, paddr, code);
+        bytes[paddr] = (static_cast<std::byte>((code & 0xFF000000) >> 24));
+        bytes[paddr + 1] = (static_cast<std::byte>((code & 0x00FF0000) >> 16));
+        bytes[paddr + 2] = (static_cast<std::byte>((code & 0x0000FF00) >> 8));
+        bytes[paddr + 3] = (static_cast<std::byte>(code));
+        paddr += 4;
+    }
+
+    file_create(path, false, 0b111111111);
+    writeb(path, bytes, 0);
+}
+
 std::vector<std::byte> init_memory(const uint32_t pmem_size) {
     std::vector<std::byte> memory(pmem_size);
 
@@ -1804,6 +1868,7 @@ static void write_back(PageTable &pt, const std::vector<std::byte> &memory, cons
         .offset = 0,
         .swap_region = true
     };
+    file_create(mp.path, false, 0b111111111);
 
 SWAP_BACK:
 
@@ -1812,7 +1877,7 @@ SWAP_BACK:
 
     std::vector<std::byte> page_cpy(PAGE_SIZE);
     const uint32_t ppn = pt.translate(vpn * PAGE_SIZE);
-    const uint32_t paddr = ppn * PAGE_SIZE;
+    const uint32_t paddr = ppn;
     for (uint32_t i = 0; i < PAGE_SIZE; i += 4) {
         const uint32_t data = read_raw(memory, paddr);
         page_cpy[i] = static_cast<std::byte>((data & 0xFF000000) >> 24);
@@ -1846,12 +1911,35 @@ static void load_page(const PageTable &pt, std::vector<std::byte> &memory, const
 
 
 static bool needs_reclaim(const uint32_t mem_size, const uint32_t curr_size) {
-    assert(waterline > 0 && waterline < 1);
     assert(mem_size >= curr_size);
-    const uint32_t total_pages = mem_size / PAGE_SIZE;
-    return (1.0 * curr_size / total_pages) > waterline;
+    return curr_size >= waterline;
 }
 
+
+
+void swap_fifo(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault) {
+
+    if (!needs_reclaim(memory.size(), page_queue.size())) {
+        const auto ppn = pt.alloc_physical_page();
+        pt.set_ppn(fault.vaddr, ppn);
+        load_page(pt, memory, PageTable::get_page_number(fault.vaddr));
+        pt.set_present(fault.vaddr, true);
+        page_queue.push_back(PageTable::get_page_number(fault.vaddr));
+        return;
+    }
+    const auto swap_vpn = page_queue.front();
+    page_queue.pop_front();
+    const auto swap_vaddr = swap_vpn * PAGE_SIZE;
+    write_back(pt, memory, swap_vpn);
+
+    pt.set_ppn(fault.vaddr, pt.get_ppn(swap_vpn));
+    load_page(pt, memory, fault.vaddr / PAGE_SIZE);
+    pt.set_present(swap_vaddr, false);
+
+}
+void swap_lru(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault) {
+    swap_fifo(pt, memory, fault);
+}
 
 // 普通改进版CLOCK算法
 void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault) {
@@ -1862,6 +1950,7 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
         pt.set_ppn(fault.vaddr, ppn);
         load_page(pt, memory, PageTable::get_page_number(fault.vaddr));
         pt.set_present(fault.vaddr, true);
+        p_list.push_back(PageTable::get_page_number(fault.vaddr));
         return;
     }
     auto it = p_list.begin();
@@ -1893,11 +1982,13 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
     if (cycle >= 2) {
         pt.set_ppn(fault.vaddr, pt.get_ppn(*write_back_page));
         write_back(pt, memory, *write_back_page);
-        load_page(pt, memory, fault.vaddr);
+        load_page(pt, memory, fault.vaddr / PAGE_SIZE);
+        p_list.erase(write_back_page);
     } else {
         pt.set_ppn(fault.vaddr, pt.get_ppn(*it));
-        load_page(pt, memory, fault.vaddr);
+        load_page(pt, memory, fault.vaddr / PAGE_SIZE);
         pt.set_present(*it * PAGE_SIZE, false);
+        p_list.erase(it);
     }
     pt.set_present(fault.vaddr, true);
 }
@@ -1907,21 +1998,35 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
 
 
 void page_fault_handler(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault) {
-    swap_clock(pt, memory, fault);
+    switch (page_swap_algo) {
+        case LRU:
+            swap_lru(pt, memory, fault);
+            break;
+        case FIFO:
+            swap_fifo(pt, memory, fault);
+            break;
+        case CLOCK:
+            swap_clock(pt, memory, fault);
+            break;
+        default:
+            throw std::invalid_argument("invalid page swap algo");
+    }
 }
 
 
 void expr1() {
+    page_swap_algo = LRU;
     current_user_idx = 0;
     working_dir = "/";
     working_dir_ino = fs.root_ino;
-
-    waterline = 0.8;
-    std::cout << "dist size: " << DISK_SIZE << std::endl;
-    std::cout << "page size: " << PAGE_SIZE << std::endl;
     constexpr uint32_t vmem_size = 16 * 1024 * 1024;
     constexpr uint32_t pmem_size = 1 * 1024 * 1024;
     constexpr uint32_t pages = vmem_size / PAGE_SIZE;
+
+    waterline = 3;  // 2个页
+    std::cout << "dist size: " << DISK_SIZE << std::endl;
+    std::cout << "page size: " << PAGE_SIZE << std::endl;
+
     std::cout << "pages: " << pages << std::endl;
     std::cout << "pmem_size: " << (pmem_size / 1024 / 1024) << "MB" << std::endl;
 
@@ -1932,13 +2037,15 @@ void expr1() {
     std::cout << std::dec;
 
     init_code("/code1", 3);
-    load_code("/code1", pt);
+    init_code2("/code2");
+    load_code("/code2", pt);
     while (!cpu.shutdown) {
         try {
             cpu.step();
             std::cout << cpu << std::endl;
         } catch (const Fault& fault) {
             if (fault.type == PF) {
+                std::cout << fault.vaddr << std::endl;
                 page_fault_handler(pt, memory, fault);
             } else {
                 printf(fault.what());
