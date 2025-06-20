@@ -12,7 +12,6 @@
 #include <chrono>
 #include <iomanip>
 #include <cstring>
-#include <filesystem>
 #include <ranges>
 #include <utility>
 
@@ -1224,10 +1223,9 @@ void expr2() {
 
 
 static std::list<uint32_t> page_queue;
-PAGE_SWAP_ALGO algo = LRU;
 
 void lru_access(const uint32_t vpn) {
-    if (algo != LRU) {
+    if (page_swap_algo != LRU) {
         return;
     }
     const auto it = std::find(page_queue.cbegin(), page_queue.cend(), vpn);
@@ -1640,8 +1638,9 @@ private:
     uint32_t ebx;
     uint32_t ecx;
     uint32_t edx;
+public:
     uint32_t ip;
-
+private:
     MMU mmu;
 
     // 内部寄存器，用户不可见
@@ -1760,20 +1759,20 @@ void init_code(const std::string &path, const int pages_cnt) {
     file_create(path, false, 0b111111111);
     writeb(path, bytes, 0);
 
-    for (const uint32_t code1 : codes) {
-        std::cout << std::hex << code1 << std::endl;
-    }
-    int i = 0;
-    for (auto byte : readb(path, 4096, PAGE_SIZE)) {
-        if (i++ % 4 == 0) {
-            std::cout << std::endl;
-        }
-        if (i > codes.size() * 4) {
-            break;
-        }
-        std::cout << std::left << std::setw(2) << std::hex << static_cast<uint32_t>(byte) << "";
-    };
-    std::cout << std::dec << std::endl;
+    // for (const uint32_t code1 : codes) {
+    //     std::cout << std::hex << code1 << std::endl;
+    // }
+    // int i = 0;
+    // for (auto byte : readb(path, 4096, PAGE_SIZE)) {
+    //     if (i++ % 4 == 0) {
+    //         std::cout << std::endl;
+    //     }
+    //     if (i > codes.size() * 4) {
+    //         break;
+    //     }
+    //     std::cout << std::left << std::setw(2) << std::hex << static_cast<uint32_t>(byte) << "";
+    // };
+    // std::cout << std::dec << std::endl;
 }
 
 void init_code2(const std::string &path) {
@@ -1805,6 +1804,10 @@ void init_code2(const std::string &path) {
         make_instruction(MOV_M, {NUL, NUL, EAX, EBX}, 0),
         make_instruction(HLT, {NUL, NUL, NUL, NUL}, 0),
     };
+    for (const auto byte : codes) {
+        std::cout << std::hex << byte << std::endl;
+    }
+    std::cout << std::dec;
     codes.resize(pages_cnt * PAGE_SIZE / 4);
     std::vector<std::byte> bytes(PAGE_SIZE * pages_cnt);
     uint32_t paddr = 0;
@@ -1872,14 +1875,14 @@ static void write_back(PageTable &pt, const std::vector<std::byte> &memory, cons
 
 SWAP_BACK:
 
-    pt.set_present(vpn, false);
-    pt.set_dirty(vpn, false);
+    pt.set_present(vpn * PAGE_SIZE, false);
+    pt.set_dirty(vpn * PAGE_SIZE, false);
 
     std::vector<std::byte> page_cpy(PAGE_SIZE);
-    const uint32_t ppn = pt.translate(vpn * PAGE_SIZE);
-    const uint32_t paddr = ppn;
+     const uint32_t paddr = pt.translate(vpn * PAGE_SIZE);
+
     for (uint32_t i = 0; i < PAGE_SIZE; i += 4) {
-        const uint32_t data = read_raw(memory, paddr);
+        const uint32_t data = read_raw(memory, paddr + i);
         page_cpy[i] = static_cast<std::byte>((data & 0xFF000000) >> 24);
         page_cpy[i + 1] = static_cast<std::byte>((data & 0x00FF0000) >> 16);
         page_cpy[i + 2] = static_cast<std::byte>((data & 0x0000FF00) >> 8);
@@ -1920,6 +1923,7 @@ static bool needs_reclaim(const uint32_t mem_size, const uint32_t curr_size) {
 void swap_fifo(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault) {
 
     if (!needs_reclaim(memory.size(), page_queue.size())) {
+        std::cout << '*' << std::endl;
         const auto ppn = pt.alloc_physical_page();
         pt.set_ppn(fault.vaddr, ppn);
         load_page(pt, memory, PageTable::get_page_number(fault.vaddr));
@@ -1932,10 +1936,14 @@ void swap_fifo(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault
     const auto swap_vaddr = swap_vpn * PAGE_SIZE;
     write_back(pt, memory, swap_vpn);
 
-    pt.set_ppn(fault.vaddr, pt.get_ppn(swap_vpn));
-    load_page(pt, memory, fault.vaddr / PAGE_SIZE);
+    const auto need_vpn = fault.vaddr / PAGE_SIZE;
+    pt.set_ppn(fault.vaddr, pt.get_ppn(swap_vpn * PAGE_SIZE));
+    load_page(pt, memory, need_vpn);
     pt.set_present(swap_vaddr, false);
+    pt.set_present(fault.vaddr, true);
+    page_queue.push_back(need_vpn);
 
+    std::cout << swap_vpn << std::endl;
 }
 void swap_lru(PageTable &pt, std::vector<std::byte> &memory, const Fault &fault) {
     swap_fifo(pt, memory, fault);
@@ -1991,6 +1999,7 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
         p_list.erase(it);
     }
     pt.set_present(fault.vaddr, true);
+    page_queue.push_back(fault.vaddr / PAGE_SIZE);
 }
 
 
@@ -2015,7 +2024,9 @@ void page_fault_handler(PageTable &pt, std::vector<std::byte> &memory, const Fau
 
 
 void expr1() {
-    page_swap_algo = LRU;
+    uint32_t acc_cnt = 0;
+    uint32_t int_cnt = 0;
+    page_swap_algo = FIFO;
     current_user_idx = 0;
     working_dir = "/";
     working_dir_ino = fs.root_ino;
@@ -2039,26 +2050,30 @@ void expr1() {
     init_code("/code1", 3);
     init_code2("/code2");
     load_code("/code2", pt);
+
+    uint32_t ip_cpy = 0;
     while (!cpu.shutdown) {
         try {
+            ip_cpy = cpu.ip;
             cpu.step();
-            std::cout << cpu << std::endl;
+            // std::cout << cpu << std::endl;
+            acc_cnt++;
         } catch (const Fault& fault) {
             if (fault.type == PF) {
-                std::cout << fault.vaddr << std::endl;
+                // std::cout << fault.vaddr / PAGE_SIZE << std::endl;
                 page_fault_handler(pt, memory, fault);
+                cpu.ip = ip_cpy;
+                int_cnt++;
             } else {
                 printf(fault.what());
                 return;
             }
         }
     }
+    std::cout << (1.0 * int_cnt / acc_cnt) << std::endl;
 }
 
 int main() {
-
-
-
     expr1();
     // expr2();
     return 0;
