@@ -1738,7 +1738,7 @@ void init_code(const std::string &path, const int pages_cnt) {
         make_instruction(JMP_I, {NUL, NUL, NUL, NUL}, 36),
         make_instruction(JMP_R, {NUL, NUL, NUL, ECX}, 0),
         make_instruction(NOP, {NUL, NUL, NUL, NUL}, 0),
-        // make_instruction(HLT, {NUL, NUL, NUL, NUL}, 0),
+        make_instruction(HLT, {NUL, NUL, NUL, NUL}, 0),
     };
     codes.resize(pages_cnt * PAGE_SIZE / 4);
     std::vector<std::byte> bytes(PAGE_SIZE * pages_cnt);
@@ -1805,7 +1805,7 @@ void init_code2(const std::string &path) {
         make_instruction(HLT, {NUL, NUL, NUL, NUL}, 0),
     };
     for (const auto byte : codes) {
-        std::cout << std::hex << byte << std::endl;
+        // std::cout << std::hex << byte << std::endl;
     }
     std::cout << std::dec;
     codes.resize(pages_cnt * PAGE_SIZE / 4);
@@ -1894,7 +1894,7 @@ SWAP_BACK:
     writeb(mp.path, page_cpy, mp.offset);
 }
 
-static void load_page(const PageTable &pt, std::vector<std::byte> &memory, const uint32_t vpn) {
+static void load_page(PageTable &pt, std::vector<std::byte> &memory, const uint32_t vpn) {
     assert(!pt.is_present(vpn * PAGE_SIZE));
     if (!pt.file_mapping.contains(vpn)) {
         throw std::runtime_error("No Page File Mapping");
@@ -1910,6 +1910,7 @@ static void load_page(const PageTable &pt, std::vector<std::byte> &memory, const
             | (static_cast<uint32_t>(bytes[i + 2]) << 8)
             | static_cast<uint32_t>(bytes[i + 3]));
     }
+    pt.set_dirty(vpn * PAGE_SIZE, false);
 }
 
 
@@ -1954,6 +1955,7 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
     static std::list<uint32_t> p_list;
 
     if (!needs_reclaim(memory.size(), p_list.size())) {
+        std::cout << "*" << std::endl;
         const auto ppn = pt.alloc_physical_page();
         pt.set_ppn(fault.vaddr, ppn);
         load_page(pt, memory, PageTable::get_page_number(fault.vaddr));
@@ -1965,6 +1967,7 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
     typeof(it) write_back_page;
     int cycle = 0;
     while (true) {
+
         const uint32_t vaddr = *it * PAGE_SIZE;
         if (!pt.is_dirty(vaddr) && !pt.is_accessed(vaddr)) {
             break;
@@ -1976,30 +1979,34 @@ void swap_clock(PageTable &pt, std::vector<std::byte> &memory, const Fault &faul
             pt.set_accessed(vaddr, false);
         }
 
+
+
+
+        ++it;
         if (it == p_list.end()) {
             it = p_list.begin();
             cycle++;
         }
-
         if (cycle >= 2) {
             break;
         }
-        ++it;
     }
-
+    uint32_t ppn = 0;
     if (cycle >= 2) {
-        pt.set_ppn(fault.vaddr, pt.get_ppn(*write_back_page));
+        std::cout << *write_back_page << std::endl;
+        ppn = pt.get_ppn(*write_back_page * PAGE_SIZE);
         write_back(pt, memory, *write_back_page);
-        load_page(pt, memory, fault.vaddr / PAGE_SIZE);
+        pt.set_present(*write_back_page * PAGE_SIZE, false);
         p_list.erase(write_back_page);
     } else {
-        pt.set_ppn(fault.vaddr, pt.get_ppn(*it));
-        load_page(pt, memory, fault.vaddr / PAGE_SIZE);
+        ppn = pt.get_ppn(*it * PAGE_SIZE);
         pt.set_present(*it * PAGE_SIZE, false);
         p_list.erase(it);
     }
+    pt.set_ppn(fault.vaddr, ppn);
+    load_page(pt, memory, fault.vaddr / PAGE_SIZE);
     pt.set_present(fault.vaddr, true);
-    page_queue.push_back(fault.vaddr / PAGE_SIZE);
+    p_list.push_back(fault.vaddr / PAGE_SIZE);
 }
 
 
@@ -2026,7 +2033,7 @@ void page_fault_handler(PageTable &pt, std::vector<std::byte> &memory, const Fau
 void expr1() {
     uint32_t acc_cnt = 0;
     uint32_t int_cnt = 0;
-    page_swap_algo = FIFO;
+    page_swap_algo = CLOCK;
     current_user_idx = 0;
     working_dir = "/";
     working_dir_ino = fs.root_ino;
@@ -2049,7 +2056,26 @@ void expr1() {
 
     init_code("/code1", 3);
     init_code2("/code2");
-    load_code("/code2", pt);
+
+    std::string buff;
+    std::cout << "algo:";
+    std::cin >> buff;
+    if (buff == "LRU") {
+        page_swap_algo = LRU;
+    } else if (buff == "FIFO") {
+        page_swap_algo = FIFO;
+    } else if (buff == "CLOCK") {
+        page_swap_algo = CLOCK;
+    } else {
+        std::cerr << "invalid page swap algo" << std::endl;
+        exit(0);
+    }
+    ls("/");
+    std::cout << "load file name: ";
+    std::cin >> buff;
+
+    load_code(buff, pt);
+
 
     uint32_t ip_cpy = 0;
     while (!cpu.shutdown) {
